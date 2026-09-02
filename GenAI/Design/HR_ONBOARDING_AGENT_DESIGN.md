@@ -16,13 +16,13 @@ The **HR Onboarding Agent** is an autonomous, multi-agent conversational platfor
 
 ---
 
-## 2. System Architecture
+## 2. High-Level System Architecture & Flowcharts
 
 ### 2.1 Multi-Agent Architecture Overview
 The system uses a **Stateful Graph Multi-Agent Architecture** (e.g., built with **LangGraph** or **AutoGen**). A central **Orchestrator Agent** manages state transitions, delegates sub-tasks to specialized domain agents, and coordinates Human-in-the-Loop (HITL) reviews.
 
 ```mermaid
-graph TD
+flowchart TD
     User["New Hire / Employee"] <--> SlackTeams["Slack / MS Teams Interface"]
     HRAdmin["HR Administrator / Manager"] <--> WebPortal["HR Admin Dashboard"]
     
@@ -57,44 +57,158 @@ graph TD
 
 ---
 
-## 3. Core Agent Components & Responsibilities
+### 2.2 LangGraph Orchestrator Decision Loop & State Machine
 
-### 3.1 Master Orchestrator Agent
-- **Function**: Interprets user intent, maintains long-term onboarding session state, and routes queries to sub-agents.
-- **State Machine**: Tracks employee progress across onboarding phases:
-  `PRE_BOARDING` → `DAY_1` → `WEEK_1` → `DAY_30` → `DAY_60` → `DAY_90_COMPLETED`.
-- **Human-in-the-Loop (HITL)**: Escalates to HR Admin when confidence score falls below threshold (\( \text{Confidence} < 0.75 \)) or when sensitive requests are initiated.
+This diagram illustrates how incoming messages are evaluated by the Master Orchestrator, routed to domain agents, or escalated to HR Administrators if confidence is low.
 
-### 3.2 Document Verification & Compliance Agent
-- **Function**: Collects, validates, and archives required legal and tax documents (e.g., W-4, I-9, Direct Deposit, NDA).
-- **Capabilities**:
-  - Uses multimodal OCR to verify uploaded document validity (e.g., checks expiration date, signature presence).
-  - Integrates with DocuSign/HelloSign for electronic signing.
-  - Automatically flags incomplete or illegible documents and requests resubmission.
-
-### 3.3 IT & Access Provisioning Agent
-- **Function**: Executes API calls to provision hardware, software, and communication tools.
-- **Capabilities**:
-  - Triggers Okta/Azure AD account creation based on job role templates.
-  - Automatically adds user to relevant Slack/Teams channels and Google Groups.
-  - Creates hardware request tickets in Jira Service Desk / ServiceNow.
-
-### 3.4 Knowledge & Policy RAG Agent
-- **Function**: Provides instant, grounded answers to employee questions about benefits, company policies, vacation, culture, and tech stack.
-- **Capabilities**:
-  - Performs **Hybrid Search** (Dense Embeddings + BM25 Sparse Keyword matching).
-  - Employs **Re-ranking** (e.g., Cohere Rerank) to prioritize authoritative HR documents.
-  - Strict grounding prompt ensures citations are included and prevents hallucination.
-
-### 3.5 Check-in & Sentiment Agent
-- **Function**: Proactively initiates scheduled pulse check-ins and gathers feedback.
-- **Capabilities**:
-  - Triggers automated surveys on Day 1, 7, 30, 60, and 90.
-  - Analyzes sentiment (Positive, Neutral, Negative, At-Risk) and alerts HR managers if negative sentiment or blocker issues are detected.
+```mermaid
+flowchart TD
+    Start([Incoming Employee Message]) --> PIIRedact["1. Scrub PII (Presidio)"]
+    PIIRedact --> LoadState["2. Load Session State from Redis/Postgres"]
+    LoadState --> IntentClassify{"3. Intent & Confidence Check"}
+    
+    IntentClassify -->|"High Confidence (Policy Q&A)"| RAGPath["Route to Knowledge & Policy Agent"]
+    IntentClassify -->|"High Confidence (Upload/Form)"| DocPath["Route to Document Verification Agent"]
+    IntentClassify -->|"High Confidence (Access Request)"| ITPath["Route to IT Provisioning Agent"]
+    IntentClassify -->|"High Confidence (Survey Response)"| SurveyPath["Route to Sentiment Agent"]
+    IntentClassify -->|"Low Confidence (< 0.75) / Sensitive"| HITLPath["Escalate to HR Admin (HITL)"]
+    
+    RAGPath --> RAGExecute["Execute Hybrid RAG Search"]
+    DocPath --> OCRExecute["Execute Multimodal OCR & Verification"]
+    ITPath --> ITExecute["Execute System API Call (Okta/Jira)"]
+    SurveyPath --> SentimentExecute["Analyze Sentiment Score"]
+    
+    RAGExecute --> FormatOutput["Synthesize Grounded Response"]
+    OCRExecute --> FormatOutput
+    ITExecute --> FormatOutput
+    SentimentExecute --> FormatOutput
+    
+    HITLPath --> HRNotify["Send Alert to HR Admin Workspace"]
+    HRNotify --> HRApprove{"HR Approval"}
+    HRApprove -->|"Approved / Override"| FormatOutput
+    HRApprove -->|"Rejected"| RejectMsg["Send Explanation to Employee"]
+    
+    FormatOutput --> UpdateState["Update State & Audit Log"]
+    RejectMsg --> UpdateState
+    UpdateState --> SendResponse([Deliver Response to Employee])
+```
 
 ---
 
-## 4. End-to-End Onboarding Lifecycle Flow
+## 3. Core Agent Components & Detailed Flowcharts
+
+### 3.1 Document Verification & Compliance Workflow
+
+Automates the collection, optical character recognition (OCR), signature check, and HRIS filing of mandatory documents (e.g., W-4, I-9, Direct Deposit, NDA).
+
+```mermaid
+flowchart TD
+    SubStep1([Employee Uploads Document Image/PDF]) --> SafetyCheck["Scan for Malware & Viruses"]
+    SafetyCheck --> OCRTool["Multimodal Vision/OCR Extraction"]
+    
+    OCRTool --> DocTypeCheck{"Document Type Identified?"}
+    DocTypeCheck -->|"Unknown/Illegible"| FailResubmit["Notify Employee: File Unreadable, Request Re-upload"]
+    
+    DocTypeCheck -->|"Identified (e.g. W-4 / ID)"| FieldCheck{"Required Fields Present?"}
+    FieldCheck -->|"Missing Signature / Expiry Date"| FlagMissing["Notify Employee: Missing Required Fields"]
+    
+    FieldCheck -->|"All Fields Valid"| MaskSens["Mask SSN & Bank Account in Storage"]
+    MaskSens --> ESignTrigger["Trigger DocuSign E-Signature if needed"]
+    ESignTrigger --> UploadHRIS["Save to HRIS (Workday / BambooHR)"]
+    UploadHRIS --> MarkComplete["Update Onboarding Checklist -> Completed"]
+    MarkComplete --> SuccessMsg([Notify Employee: Document Verified])
+```
+
+---
+
+### 3.2 Automated IT & System Provisioning Workflow
+
+Triggers system account setup, software access grants, and hardware dispatch immediately after offer acceptance or pre-boarding approval.
+
+```mermaid
+flowchart TD
+    Trigger([HRIS Event: New Hire Hired]) --> FetchRole["Fetch Job Template & Role Metadata"]
+    FetchRole --> IdPTask["1. Provision Identity Account (Okta / Azure AD)"]
+    
+    IdPTask --> ParallelTasks{"Execute Parallel Provisioning"}
+    
+    ParallelTasks -->|"Software Licenses"| SlackGroup["Add to Dept Slack Channels & Google Groups"]
+    ParallelTasks -->|"SaaS Access"| SaaSGrant["Grant Role-Based License (GitHub, Figma, Jira)"]
+    ParallelTasks -->|"Hardware Order"| JiraTicket["Create Hardware Order Ticket in Jira Service Desk"]
+    
+    SlackGroup --> VerifyStatus["Check Provisioning Status"]
+    SaaSGrant --> VerifyStatus
+    JiraTicket --> VerifyStatus
+    
+    VerifyStatus --> StatusCheck{"All Services Active?"}
+    StatusCheck -->|"Yes"| SendCreds["Generate Temporary Credentials & Welcome Packet"]
+    StatusCheck -->|"Failure / Timeout"| AlertIT["Alert IT Helpdesk for Manual Override"]
+    
+    SendCreds --> CompleteIT([Deliver Credentials securely via Encrypted Portal])
+```
+
+---
+
+### 3.3 Knowledge & Policy RAG Pipeline Workflow
+
+Provides accurate, halluncination-free policy answers with exact document citations using a hybrid retrieval-augmented generation pipeline.
+
+```mermaid
+flowchart LR
+    UserQuery([Employee Question]) --> Rewrite["1. Query Rewriter & HyDE"]
+    Rewrite --> DualSearch["2. Hybrid Retrieval"]
+    
+    subgraph HybridRetrieval["Hybrid Search Engine"]
+        DualSearch --> DenseSearch["Dense Vector Search (Qdrant)"]
+        DualSearch --> SparseSearch["Sparse Keyword Search (BM25)"]
+    end
+    
+    DenseSearch --> Combine["Reciprocal Rank Fusion (RRF)"]
+    SparseSearch --> Combine
+    
+    Combine --> Reranker["3. Cohere Reranker v3 (Top 3 Chunks)"]
+    Reranker --> RBACFilter["4. Role & Region Metadata Filter"]
+    
+    RBACFilter --> LLMGen["5. LLM Synthesis (GPT-4o / Claude 3.5)"]
+    LLMGen --> CitationCheck["6. Grounding & Citation Check"]
+    CitationCheck --> FinalAnswer([Deliver Response with Source Links])
+```
+
+---
+
+### 3.4 Proactive Sentiment & Check-in Milestone Workflow
+
+Initiates scheduled milestone pulse surveys (Day 1, 7, 30, 60, 90) and automatically escalates blocker issues or negative sentiment.
+
+```mermaid
+flowchart TD
+    CronTrigger([Cron Scheduler: Milestone Reached]) --> CheckStage{"Onboarding Day?"}
+    
+    CheckStage -->|"Day 1"| Day1Survey["Trigger Day 1 Orientation Pulse"]
+    CheckStage -->|"Day 7"| Day7Survey["Trigger Week 1 Equipment & Team Pulse"]
+    CheckStage -->|"Day 30"| Day30Survey["Trigger Month 1 Goal & Manager Sync Survey"]
+    CheckStage -->|"Day 90"| Day90Survey["Trigger Probation Completion Survey"]
+    
+    Day1Survey --> CollectResp([Collect Conversational Responses])
+    Day7Survey --> CollectResp
+    Day30Survey --> CollectResp
+    Day90Survey --> CollectResp
+    
+    CollectResp --> SentimentLLM["Analyze Sentiment & Intent (LLM Classifier)"]
+    SentimentLLM --> SentimentScore{"Evaluate Sentiment"}
+    
+    SentimentScore -->|"Positive / Satisfied"| LogPulse["Log Feedback to HR Analytics"]
+    SentimentScore -->|"Neutral"| FollowupQ["Send Automated Helpful Follow-up Tip"]
+    SentimentScore -->|"Negative / Blocker Detected"| EscalateHR["Raise Urgent HR Alert + Book Manager 1-on-1"]
+    
+    LogPulse --> EndCheck([Complete Milestone Check])
+    FollowupQ --> EndCheck
+    EscalateHR --> EndCheck
+```
+
+---
+
+## 4. End-to-End Onboarding Lifecycle Sequence Flow
 
 ```mermaid
 sequenceDiagram
@@ -146,7 +260,7 @@ sequenceDiagram
 | **Embeddings & Reranking** | OpenAI `text-embedding-3-large` + Cohere Rerank v3 | Superior contextual retrieval quality for enterprise policy documents. |
 | **PII & Safety Guardrails** | Microsoft Presidio + NeMo Guardrails | Anonymize SSN, DOB, bank details before sending prompts to external LLMs. |
 | **Chat Interfaces** | Slack Bolt SDK / Microsoft Bot Framework | Deep enterprise integration into existing employee communication channels. |
-| **Backend & Orchestration** | FastApi (Python 3.11+) / Celery / Redis | Async execution of long-running workflows and webhooks. |
+| **Backend & Orchestration** | FastAPI (Python 3.11+) / Celery / Redis | Async execution of long-running workflows and webhooks. |
 | **Database & Cache** | PostgreSQL (JSONB) + Redis | Persistent state snapshotting, user session management, rate limiting. |
 | **Observability** | LangSmith / Phoenix Arize / OpenTelemetry | Tracing agent step-by-step reasoning, latency, cost, and hallucination monitoring. |
 
@@ -199,20 +313,18 @@ INSTRUCTIONS:
 - **Inbound Sanitization**: Every user message passes through an anonymization pipeline using **Microsoft Presidio**.
 - **PII Scrubbing**: SSNs, Tax Identification Numbers, Banking Details, DOBs, and Phone Numbers are replaced with pseudo-tokens (e.g., `[REDACTED_SSN]`) before LLM invocation.
 
-### 7.2 Security Control Matrix
-```mermaid
-graph LR
-    UserQuery[User Input] --> PIIFilter[1. PII Redaction Filter]
-    PIIFilter --> GuardrailCheck[2. Topic & Prompt Injection Guard]
-    GuardrailCheck --> AgentCore[3. Multi-Agent Engine]
-    AgentCore --> RBACFilter[4. Role-Based Retrieval Filter]
-    RBACFilter --> ResponseGen[5. LLM Response Generation]
-    ResponseGen --> OutputGuard[6. Output Safety Check]
-    OutputGuard --> FinalOutput[Delivered Response]
-```
+### 7.2 Security Control Matrix Flow
 
-- **Role-Based Access Control (RBAC)**: Vector DB queries enforce metadata filters (e.g., `department == "Engineering" AND location == "US"`). An engineer cannot view executive compensation policies or region-inapplicable benefits documents.
-- **Audit Logging**: Immutable audit trail stored in PostgreSQL documenting all tool calls, document submissions, and state transitions for compliance audits (SOC2 Type II, GDPR, HIPAA).
+```mermaid
+flowchart LR
+    UserQuery["User Input"] --> PIIFilter["1. PII Redaction Filter"]
+    PIIFilter --> GuardrailCheck["2. Topic & Injection Guard"]
+    GuardrailCheck --> AgentCore["3. Multi-Agent Engine"]
+    AgentCore --> RBACFilter["4. Role-Based Access Filter"]
+    RBACFilter --> ResponseGen["5. LLM Synthesis"]
+    ResponseGen --> OutputGuard["6. Safety Check"]
+    OutputGuard --> FinalOutput["Delivered Response"]
+```
 
 ---
 
@@ -261,4 +373,4 @@ gantt
 ---
 
 ## 10. Summary & Conclusion
-The proposed HR Onboarding Agent architecture combines stateful multi-agent orchestration with enterprise-grade RAG and strict security controls. By automating manual overhead while maintaining human oversight for critical touchpoints, the system delivers a high-touch, error-free onboarding journey for new employees.
+The proposed HR Onboarding Agent architecture combines stateful multi-agent orchestration with enterprise-grade RAG, automated tool execution, and strict security controls. By visualizing every stage from document verification to IT provisioning and milestone sentiment analysis, this document provides a complete blueprint for building a high-touch, error-free onboarding platform.
