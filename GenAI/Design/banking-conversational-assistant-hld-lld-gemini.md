@@ -86,7 +86,7 @@ Combining both via **Hybrid Search** ensures we don't miss semantic intent or ex
 #### 💡 Concept Rationale & Why It Exists
 BM25 returns raw keyword scores (e.g., 12.4), while vector search returns cosine similarity scores (e.g., 0.82). You cannot directly add or average these numbers. **Reciprocal Rank Fusion (RRF)** combines their *rankings* rather than their raw scores.
 
-$$\text{RRF\_Score}(d \in D) = \sum_{m \in M} \frac{1}{k + r_m(d)}$$
+$$\text{RRF}_{\text{score}}(d \in D) = \sum_{m \in M} \frac{1}{k + r_m(d)}$$
 
 *(where $k = 60$ is a standard smoothing constant, and $r_m(d)$ is the rank of document $d$ in retriever $m$).*
 
@@ -798,18 +798,14 @@ flowchart LR
 
 ## 11. Master Cheat Sheet & Design Summary
 
-```
-+-----------------------------------------------------------------------------------------+
-|                        BANKING ASSISTANT SYSTEM DESIGN CHEAT SHEET                      |
-+-----------------------------------------------------------------------------------------+
-| 1. CORE PARADIGM    | Access-control system with an LLM attached. Zero Standing Trust.   |
-| 2. TOKEN SCOPING    | RFC 8693 OAuth 2.0 Downscoped Short-Lived JWTs per turn.          |
-| 3. DATA ARCHITECTURE| ZERO customer account data in Vector DB. Live API fetch only.     |
-| 4. RETRIEVAL MATH   | Hybrid (BM25 + HNSW) -> Reciprocal Rank Fusion -> Cross-Encoder. |
-| 5. GUARDRAILS       | Dual Engine: Input (Scrub/Block) & Output (Grounding/Leak Check). |
-| 6. STATE ENGINE     | LangGraph DAG with checkpointing in Redis for Async MFA/HITL.    |
-| 7. TRANSACTIONS     | Core Banking executes logic via API; LLM only narrates status.   |
-| 8. AUDITABILITY     | Immutable SHA-256 Hash-Chained WORM Audit Storage (S3 Object Lock)|
-| 9. RESILIENCE       | Resilience4j Circuit Breakers + Fallback to Rule-based Engine.    |
-+-----------------------------------------------------------------------------------------+
-```
+| # | Core Concept / Layer | Architectural Rule & Implementation Strategy |
+|---|---|---|
+| **1** | **Core Paradigm** | Access-control system with an LLM attached. Zero Standing Permissions for the model. |
+| **2** | **Token Scoping** | RFC 8693 OAuth 2.0 Downscoped Short-Lived JWTs issued per transaction turn. |
+| **3** | **Data Architecture** | ZERO customer account data in Vector DB. Live API fetch via Core Banking Gateway only. |
+| **4** | **Retrieval Pipeline** | Sparse (BM25) + Dense (HNSW) Hybrid Search $\rightarrow$ Reciprocal Rank Fusion $\rightarrow$ Cross-Encoder Rerank. |
+| **5** | **Dual Guardrails** | Input Guardrail (PII Scrubbing + Injection Classifier) & Output Guardrail (Groundedness $G=1.0$ + Leak Check). |
+| **6** | **State Orchestration** | LangGraph Directed Acyclic Graph (DAG) with node checkpointing in Redis for Async MFA & Human Review. |
+| **7** | **Transaction Execution** | Core Banking System executes business logic via API; LLM only formats natural language status. |
+| **8** | **Audit & Non-Repudiation**| Immutable SHA-256 Hash-Chained WORM Audit Storage (Amazon S3 Object Lock / QLDB). |
+| **9** | **Resilience Engineering** | Resilience4j Circuit Breakers + Automatic Fallback to Rule-based Engine / Human Live Agent. |
